@@ -129,7 +129,8 @@ async def main() -> None:
 
     await database.connect()
 
-    # Build both clients
+    # Build both clients separately — do NOT use `async with both` together
+    # to avoid any session cross-contamination.
     userbot = TelegramClient(
         config.SESSION_NAME,
         config.API_ID,
@@ -153,51 +154,78 @@ async def main() -> None:
         except NotImplementedError:
             pass
 
-    async with userbot, control_bot:
-        # Start the userbot (user account)
-        await userbot.start(phone=config.PHONE_NUMBER)
-        me = await userbot.get_me()
-        logger.info(
-            "Userbot logged in as: %s %s (@%s)",
-            me.first_name or "",
-            me.last_name or "",
-            me.username or "no username",
-        )
+    # -----------------------------------------------------------------------
+    # Start the userbot (user account — phone number auth)
+    # -----------------------------------------------------------------------
+    logger.info("Starting userbot with phone: %s", config.PHONE_NUMBER)
+    await userbot.start(phone=config.PHONE_NUMBER)
 
-        # Start the control bot (bot token)
-        await control_bot.start(bot_token=config.BOT_TOKEN)
-        logger.info("Control bot started")
+    # Critical guard: make sure we logged in as a USER, not a bot.
+    me = await userbot.get_me()
+    if getattr(me, "bot", False):
+        logger.error("=" * 60)
+        logger.error("FATAL: userbot session contains a BOT TOKEN, not a user account!")
+        logger.error("Logged in as: @%s", me.username or "unknown")
+        logger.error("Auto-fixing: deleting corrupted session file and exiting.")
+        logger.error("Please restart the bot — you will be prompted for your phone number.")
+        logger.error("IMPORTANT: When prompted, enter your PHONE (+%s), NOT the bot token.", config.PHONE_NUMBER.lstrip("+"))
+        logger.error("=" * 60)
+        await userbot.disconnect()
+        # Delete the corrupted session file so next start is clean
+        import os as _os
+        session_file = f"{config.SESSION_NAME}.session"
+        if _os.path.exists(session_file):
+            _os.remove(session_file)
+            logger.error("Deleted corrupted session file: %s", session_file)
+        await database.disconnect()
+        sys.exit(1)
 
-        # Restore pause state from the previous session
-        was_paused = await database.get_bot_paused()
-        if was_paused:
-            pause_state.pause()
-            logger.info("Restored PAUSED state from previous session. Send /resume to continue.")
-        else:
-            logger.info("Bot starting in RUNNING state.")
+    logger.info(
+        "Userbot logged in as: %s %s (@%s)",
+        me.first_name or "",
+        me.last_name or "",
+        me.username or "no username",
+    )
 
-        # Discover all chats the user is in
-        chats = await discover_chats(userbot)
-        monitored_ids = {entity.id for entity in chats}
+    # -----------------------------------------------------------------------
+    # Start the control bot (bot token auth) — completely separate client
+    # -----------------------------------------------------------------------
+    await control_bot.start(bot_token=config.BOT_TOKEN)
+    logger.info("Control bot started")
 
-        # Give the bot interface a reference to the userbot + chat count
-        bot_interface.set_userbot(userbot, len(chats))
+    # Restore pause state from the previous session
+    was_paused = await database.get_bot_paused()
+    if was_paused:
+        pause_state.pause()
+        logger.info("Restored PAUSED state from previous session. Send /resume to continue.")
+    else:
+        logger.info("Bot starting in RUNNING state.")
 
-        # Register handlers
-        register_userbot_handlers(userbot, monitored_ids)
-        bot_interface.register_handlers(control_bot)
+    # Discover all chats the user is in
+    chats = await discover_chats(userbot)
+    monitored_ids = {entity.id for entity in chats}
 
-        logger.info("=== Both clients running. Starting history phase… ===")
+    # Give the bot interface a reference to the userbot + chat count
+    bot_interface.set_userbot(userbot, len(chats))
 
+    # Register handlers
+    register_userbot_handlers(userbot, monitored_ids)
+    bot_interface.register_handlers(control_bot)
+
+    logger.info("=== Both clients running. Starting history phase… ===")
+
+    try:
         # Run history reading, scheduler, and control bot concurrently
         await asyncio.gather(
             history_reader.read_history_for_all(userbot, chats),
             scheduler.run_scheduler(),
             control_bot.run_until_disconnected(),
         )
-
-    await database.disconnect()
-    logger.info("=== Telegram Userbot Stopped ===")
+    finally:
+        await userbot.disconnect()
+        await control_bot.disconnect()
+        await database.disconnect()
+        logger.info("=== Telegram Userbot Stopped ===")
 
 
 if __name__ == "__main__":
