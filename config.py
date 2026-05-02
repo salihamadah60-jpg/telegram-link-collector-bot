@@ -6,7 +6,7 @@ All credentials are read from the .env file; nothing is hard-coded.
 import os
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=True)  # override=True ensures .env wins over any system env vars
 
 
 def _require(key: str) -> str:
@@ -23,6 +23,11 @@ def _require(key: str) -> str:
 API_ID: int = int(_require("TELEGRAM_API_ID"))
 API_HASH: str = _require("TELEGRAM_API_HASH")
 PHONE_NUMBER: str = _require("TELEGRAM_PHONE")
+if ":" in PHONE_NUMBER:
+    raise EnvironmentError(
+        "TELEGRAM_PHONE looks like a bot token (it contains ':')! "
+        "Check your .env file — TELEGRAM_PHONE should be a phone number like +1234567890."
+    )
 SESSION_NAME: str = os.getenv("SESSION_NAME", "userbot_session")
 
 # Telegram bot token (for the control UI)
