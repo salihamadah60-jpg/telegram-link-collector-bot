@@ -114,6 +114,16 @@ async def get_unsent_links(link_type: Literal["telegram", "whatsapp"]) -> list[d
     return await cursor.to_list(length=None)
 
 
+async def get_all_links(link_type: Literal["telegram", "whatsapp"]) -> list[dict]:
+    """Return all links (sent + unsent) of the given type, oldest first."""
+    db = _get_db()
+    cursor = db.links.find(
+        {"link_type": link_type},
+        {"_id": 0, "url": 1, "source_chat": 1, "message_date": 1},
+    ).sort("added_at", ASCENDING)
+    return await cursor.to_list(length=None)
+
+
 async def get_recent_links(limit: int = 10) -> list[dict]:
     """Return the most recently added links regardless of type."""
     db = _get_db()
