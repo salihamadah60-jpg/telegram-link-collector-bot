@@ -10,11 +10,14 @@ Design principle:
 Commands / buttons:
   /start          → show dashboard (or create it)
   /stats          → send a compact snapshot that self-destructs in 10 seconds
+  /export         → export current unsent links as .docx files, sent to you here
+  /export all     → export ALL links (including already-sent) as .docx files
   /reset          → confirm then wipe all collected links (with optional history re-read)
   /pause          → freeze all processing; auto-saves current position
   /resume         → continue from the exact point where it was paused
   📊 Refresh      → update stats in place
-  📤 Send Now     → force-send .docx files even if < threshold
+  📤 Send Now     → force-send .docx files to target chat even if < threshold
+  📥 Export to Me → send .docx files directly to this chat (does NOT mark as sent)
   🚫 Excluded     → view/manage excluded chats
   🔗 Recent Links → show last 10 links found
   ← Back          → return to main dashboard
@@ -22,6 +25,7 @@ Commands / buttons:
 
 import asyncio
 import logging
+import os
 import re
 from typing import Optional
 
@@ -115,10 +119,11 @@ def _dashboard_buttons() -> list:
         else Button.inline("⏸️ Pause", b"pause_btn")
     )
     return [
-        [Button.inline("📊 Refresh", b"refresh"), Button.inline("📤 Send Files Now", b"send_now")],
-        [Button.inline("🚫 Excluded Chats", b"excluded"), Button.inline("🔗 Recent Links", b"recent")],
-        [Button.inline("⛔ Block by Link", b"block_link_btn"), Button.inline("📍 Set Target Chat", b"set_target_btn")],
-        [Button.inline("📋 View Blocked Links", b"view_blocked"), pause_btn],
+        [Button.inline("📊 Refresh", b"refresh"), Button.inline("📤 Send Now", b"send_now")],
+        [Button.inline("📥 Export to Me", b"export_now"), Button.inline("🔗 Recent Links", b"recent")],
+        [Button.inline("🚫 Excluded Chats", b"excluded"), Button.inline("⛔ Block by Link", b"block_link_btn")],
+        [Button.inline("📍 Set Target", b"set_target_btn"), Button.inline("📋 Blocked Links", b"view_blocked")],
+        [pause_btn],
     ]
 
 
@@ -200,12 +205,56 @@ async def _self_destruct(bot: TelegramClient, chat_id: int, message_id: int, del
 def register_handlers(bot: TelegramClient) -> None:
 
     # ------------------------------------------------------------------
+    # Internal helper: export .docx files directly to the user's chat
+    # Does NOT mark links as sent — purely for the user's own copy.
+    # ------------------------------------------------------------------
+    async def _do_export(chat_id: int, user_id: int, include_sent: bool = False) -> None:
+        sent_any = False
+        label = "all" if include_sent else "unsent"
+        for link_type in ("telegram", "whatsapp"):
+            try:
+                filepath, count = await document_manager.build_export_doc(
+                    link_type, include_sent=include_sent
+                )
+                caption = (
+                    f"📥 **{link_type.capitalize()} links** — {label} ({count} links)\n"
+                    f"_This export does not mark links as sent._"
+                )
+                await bot.send_file(chat_id, filepath, caption=caption, parse_mode="md")
+                os.remove(filepath)
+                sent_any = True
+            except ValueError:
+                pass  # No links of this type — skip silently
+            except Exception as exc:
+                logger.error("Export error for %s: %s", link_type, exc)
+
+        if not sent_any:
+            await bot.send_message(
+                chat_id,
+                "ℹ️ **No links to export yet.** "
+                "Use `/export all` to include previously sent links too.",
+                parse_mode="md",
+            )
+        await _show_dashboard(bot, user_id, chat_id)
+
+    # ------------------------------------------------------------------
     # /start command — show or refresh the dashboard
     # ------------------------------------------------------------------
     @bot.on(events.NewMessage(pattern=r"^/start$", func=lambda e: e.is_private))
     async def on_start(event: events.NewMessage.Event) -> None:
         await _delete_user_message(bot, event)
         await _show_dashboard(bot, event.sender_id, event.chat_id)
+
+    # ------------------------------------------------------------------
+    # /export command — export .docx files directly to this chat right now
+    #   /export       → unsent links only  (does NOT mark them as sent)
+    #   /export all   → every link ever collected
+    # ------------------------------------------------------------------
+    @bot.on(events.NewMessage(pattern=r"^/export(?:\s+(.*))?$", func=lambda e: e.is_private))
+    async def on_export_cmd(event: events.NewMessage.Event) -> None:
+        await _delete_user_message(bot, event)
+        include_sent = "all" in (event.pattern_match.group(1) or "").lower()
+        await _do_export(event.chat_id, event.sender_id, include_sent=include_sent)
 
     # ------------------------------------------------------------------
     # /stats command — compact snapshot, self-destructs in 10 seconds
@@ -508,6 +557,14 @@ def register_handlers(bot: TelegramClient) -> None:
 
         # Refresh the dashboard to show updated counts
         await _show_dashboard(bot, user_id, chat_id)
+
+    # ------------------------------------------------------------------
+    # Inline button: 📥 Export to Me — export .docx to THIS chat (no mark-sent)
+    # ------------------------------------------------------------------
+    @bot.on(events.CallbackQuery(data=b"export_now"))
+    async def on_export_now(event) -> None:
+        await event.answer("Preparing export…")
+        await _do_export(event.chat_id, event.sender_id, include_sent=False)
 
     # ------------------------------------------------------------------
     # Inline button: Refresh stats
