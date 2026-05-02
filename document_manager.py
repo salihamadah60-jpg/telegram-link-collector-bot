@@ -138,6 +138,32 @@ async def build_and_save(link_type: Literal["telegram", "whatsapp"]) -> str:
     return filename
 
 
+async def build_export_doc(
+    link_type: Literal["telegram", "whatsapp"],
+    include_sent: bool = False,
+) -> tuple[str, int]:
+    """
+    Build an on-demand export .docx.
+    Unlike build_and_save(), this does NOT mark links as sent and uses a
+    timestamped filename so it never conflicts with the auto-send file.
+    Returns (filepath, link_count).
+    """
+    if include_sent:
+        links = await database.get_all_links(link_type)
+    else:
+        links = await database.get_unsent_links(link_type)
+
+    if not links:
+        raise ValueError(f"No {link_type} links to export")
+
+    doc = _build_document(links, link_type)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    filename = f"export_{link_type}_{ts}.docx"
+    doc.save(filename)
+    logger.info("Export: saved %d %s links → %s", len(links), link_type, filename)
+    return filename, len(links)
+
+
 async def cleanup_file(link_type: Literal["telegram", "whatsapp"]) -> None:
     """Delete the .docx file from disk after sending."""
     filename = _get_filename(link_type)
